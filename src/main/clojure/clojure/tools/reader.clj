@@ -32,7 +32,7 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (declare ^:private read*
-         macros dispatch-macros
+         macros dispatch-macros periform-macros
          ^:dynamic *read-eval*
          ^:dynamic *data-readers*
          ^:dynamic *default-data-reader-fn*
@@ -69,9 +69,24 @@
   [rdr _ opts pending-forms]
   (if-let [ch (read-char rdr)]
     (if-let [dm (dispatch-macros ch)]
-      (dm rdr ch opts pending-forms)
+      (do
+        (println "RD: " ch)
+        (let [x (dm rdr ch opts pending-forms)]
+        (println "RD result: " x)
+          x))
       (read-tagged (doto rdr (unread ch)) ch opts pending-forms)) ;; ctor reader is implemented as a tagged literal
     (err/throw-eof-at-dispatch rdr)))
+
+(declare read-periform-id)
+
+(defn- read-periform
+  [rdr _ opts pending-forms]
+  (if-let [ch (read-char rdr)]
+    (if-let [pm (periform-macros ch)]
+      (pm rdr ch opts pending-forms)
+        (read-comment (doto rdr (unread ch))))
+      ;;(read-periform-id (doto rdr (unread ch)) ch opts pending-forms))
+    (err/throw-eof-at-dispatch rdr)));#(based on read-dispatch)
 
 (defn- read-unmatched-delimiter
   [rdr ch opts pending-forms]
@@ -202,6 +217,24 @@
               (err/throw-eof-delimited rdr kind start-line start-column (count a))
               (recur (conj! a form)))))))))
 
+(defn- read-periform-rule
+  "Read a periform list"
+  [rdr _ opts pending-forms]
+  (let [[start-line start-column] (starting-line-col-info rdr)
+        the-list (read-delimited :list \) rdr opts pending-forms)
+        [end-line end-column] (ending-line-col-info rdr)]
+    (with-meta (if (empty? the-list)
+                 '()
+                 (clojure.lang.PersistentList/create the-list))
+      (when start-line
+        (merge
+         (when-let [file (get-file-name rdr)]
+           {:file file})
+         {:line start-line
+          :column start-column
+          :end-line end-line
+          :end-column end-column})))))
+
 (defn- read-list
   "Read in a list, including its location if the reader is an indexing reader"
   [rdr _ opts pending-forms]
@@ -325,6 +358,24 @@
                       :end-line end-line
                       :end-column end-column})))))
             (err/throw-invalid rdr :symbol token))))))
+
+(defrecord PeriForm [id])
+
+(defn- sym->periform-id [sym]
+  (->PeriForm (name sym))
+  )
+
+(defn- read-periform-id [rdr initch opts pending-forms]
+  (let [tag (read* rdr true nil opts pending-forms)]
+    (println "pfs: " pending-forms)
+    (println "TAG: " tag)
+    (if-not (symbol? tag)
+      (err/throw-bad-reader-tag rdr tag))
+    (read-comment rdr)
+    (let [x (sym->periform-id tag)]
+      (println "PId: " x)
+      x)
+    ));#(based on read-tagged)
 
 (def ^:dynamic *alias-map*
   "Map from ns alias to ns, if non-nil, it will be used to resolve read-time
@@ -779,7 +830,7 @@
   (case ch
     \" read-string*
     \: read-keyword
-    \; read-comment
+    \; read-periform
     \' (wrapping-reader 'quote)
     \@ (wrapping-reader 'clojure.core/deref)
     \^ read-meta
@@ -810,6 +861,13 @@
     \? read-cond
     \: read-namespaced-map
     \# read-symbolic-value
+    nil))
+
+(defn- periform-macros [ch]
+  (case ch
+    \; read-comment
+    \( read-periform-rule
+    \# read-periform-id
     nil))
 
 (defn- read-ctor [rdr class-name opts pending-forms]
@@ -847,6 +905,8 @@
 
 (defn- read-tagged [rdr initch opts pending-forms]
   (let [tag (read* rdr true nil opts pending-forms)]
+    (println "pfs: " pending-forms)
+    (println "TAG: " tag)
     (if-not (symbol? tag)
       (err/throw-bad-reader-tag rdr tag))
     (if *suppress-read*
